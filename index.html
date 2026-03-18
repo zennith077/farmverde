@@ -511,777 +511,679 @@
 
 <script>
 // ╔══════════════════════════════════════════════════════╗
-// ║  FARMVERDE — FRONTEND GAME CLIENT                   ║
-// ║  All sensitive logic runs on Supabase Edge Functions ║
+// ║  FARMVERDE — GAME CLIENT                            ║
+// ║  Semua logika via Supabase RPC (tanpa Edge Fn)      ║
 // ╚══════════════════════════════════════════════════════╝
 
-// ── CONFIG — Ganti dengan credentials Supabase kamu ──
+// ── CONFIG ──────────────────────────────────────────────
 const SUPABASE_URL      = 'https://vzxvavimcmtrpoirudju.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_Ip0rrsHGRIVaqFUz6w2SBw_BhG9H6_R';
-const FUNCTIONS_BASE    = SUPABASE_URL + '/functions/v1';
 
-// ── Init Supabase ──
+// ── Init Supabase ────────────────────────────────────────
 var sb;
 try {
-  var _sbLib = (typeof supabase !== 'undefined') ? supabase : window.supabase;
-  if (!_sbLib) throw new Error('Supabase SDK tidak termuat');
-  sb = _sbLib.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  var _lib = (typeof supabase !== 'undefined') ? supabase : window.supabase;
+  if (!_lib) throw new Error('Supabase SDK tidak termuat');
+  sb = _lib.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     auth: { autoRefreshToken: true, persistSession: true },
   });
 } catch(e) {
   document.addEventListener('DOMContentLoaded', function() {
-    var err = document.createElement('div');
-    err.style.cssText = 'position:fixed;inset:0;background:#fff;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;padding:24px;font-family:sans-serif;text-align:center;z-index:9999;';
-    err.innerHTML = '<div style="font-size:2rem;">⚠️</div><div style="font-size:1rem;font-weight:bold;color:#e53935;">Gagal terhubung ke server</div><div style="font-size:.85rem;color:#888;">Periksa koneksi internet kamu, lalu muat ulang halaman.</div><button onclick="location.reload()" style="padding:10px 24px;border-radius:10px;border:none;background:#40916c;color:#fff;font-size:1rem;cursor:pointer;">Muat Ulang</button>';
-    document.body.appendChild(err);
+    document.body.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;gap:16px;font-family:sans-serif;text-align:center;padding:24px;"><div style="font-size:3rem;">⚠️</div><div style="font-size:1.1rem;font-weight:bold;color:#e53935;">Gagal memuat SDK</div><div style="color:#888;">Periksa koneksi internet, lalu muat ulang.</div><button onclick="location.reload()" style="padding:12px 28px;border-radius:12px;border:none;background:#40916c;color:#fff;font-size:1rem;cursor:pointer;">Muat Ulang</button></div>';
   });
-  // Create stub so rest of code doesn't crash immediately
-  sb = { auth: { onAuthStateChange: function(){}, getSession: function(){ return Promise.resolve({data:{session:null}}); } } };
+  sb = { auth:{ onAuthStateChange:function(){}, getSession:function(){ return Promise.resolve({data:{session:null}}); }, signUp:function(){ return Promise.resolve({error:{message:'SDK tidak termuat'}}); }, signInWithPassword:function(){ return Promise.resolve({error:{message:'SDK tidak termuat'}}); }, signOut:function(){ return Promise.resolve({}); } }, from:function(){ return { select:function(){ return { eq:function(){ return { single:function(){ return Promise.resolve({data:null,error:null}); }, order:function(){ return Promise.resolve({data:[],error:null}); }, gt:function(){ return Promise.resolve({data:[],error:null}); } }; } }; }, insert:function(){ return Promise.resolve({error:null}); } }; }, rpc:function(){ return Promise.resolve({data:null,error:null}); }, channel:function(){ return { on:function(){ return { subscribe:function(){ return { unsubscribe:function(){} }; } }; } }; } };
 }
 
-// ══════════════════════════════════════════
-// STATE (client cache only — NOT source of truth)
-// ══════════════════════════════════════════
-let S = {
-  user: null,         // auth user
-  profile: null,      // users table row
-  farmSlots: [],      // farm_slots rows
-  inventory: [],      // inventory rows
-  plants: [],         // plants master (cached)
-  quests: [],         // quests + progress
-  spinType: 'coin',
-  bet: 10,
-  spinHistory: [],
-  pendingSlot: null,  // slot index waiting for plant selection
+// ── State ────────────────────────────────────────────────
+var S = {
+  user: null, profile: null,
+  farmSlots: [], inventory: [], plants: [], quests: [],
+  spinType: 'coin', bet: 10, spinHistory: [],
+  pendingSlot: null,
 };
-let _realtimeSubs = [];
-let _farmTimer = null;
+var _realtimeSubs = [];
+var _farmTimer = null;
 
-// ══════════════════════════════════════════
-// UTILS
-// ══════════════════════════════════════════
-const $ = (id) => document.getElementById(id);
-const setText = (id, v) => { const e = $(id); if (e) e.textContent = v; };
-const toast = (msg, dur = 2600) => {
-  const t = $('toast'); if (!t) return;
-  t.textContent = msg; t.classList.add('show');
-  clearTimeout(t._t); t._t = setTimeout(() => t.classList.remove('show'), dur);
+// ── Utils ────────────────────────────────────────────────
+var $ = function(id){ return document.getElementById(id); };
+var setText = function(id, v){ var e=$(id); if(e) e.textContent=v; };
+var toast = function(msg, dur){
+  dur = dur||2600;
+  var t=$('toast'); if(!t) return;
+  t.textContent=msg; t.classList.add('show');
+  clearTimeout(t._t); t._t=setTimeout(function(){ t.classList.remove('show'); }, dur);
 };
-const closeModal = (id) => $(id)?.classList.remove('open');
+var closeModal = function(id){ var m=$(id); if(m) m.classList.remove('open'); };
 
-function fmtCoins(n) {
-  if (n >= 1e6) return (n/1e6).toFixed(1) + 'jt';
-  if (n >= 1e3) return (n/1e3).toFixed(1) + 'k';
+function fmtCoins(n){
+  if(n>=1e6) return (n/1e6).toFixed(1)+'jt';
+  if(n>=1e3) return (n/1e3).toFixed(1)+'k';
   return String(n);
 }
-function fmtTime(sec) {
-  if (sec <= 0) return 'siap!';
-  if (sec < 60) return sec + 'd';
-  if (sec < 3600) return Math.floor(sec/60) + 'm ' + (sec%60) + 'd';
-  return Math.floor(sec/3600) + 'j ' + Math.floor((sec%3600)/60) + 'm';
+function fmtTime(sec){
+  if(sec<=0) return 'siap!';
+  if(sec<60) return sec+'d';
+  if(sec<3600) return Math.floor(sec/60)+'m '+(sec%60)+'d';
+  return Math.floor(sec/3600)+'j '+Math.floor((sec%3600)/60)+'m';
 }
-function calcLevel(xp) {
-  let lv = 1, thr = 100;
-  while (xp >= thr && lv < 100) { xp -= thr; lv++; thr = Math.floor(thr * 1.5); }
-  return lv;
-}
-function xpPercent(xp, level) {
-  let thr = 100, cum = 0;
-  for (let l = 1; l < level; l++) { cum += thr; thr = Math.floor(thr * 1.5); }
-  return Math.min(((xp - cum) / thr) * 100, 100);
+function xpPercent(xp, level){
+  var thr=100, cum=0;
+  for(var l=1;l<level;l++){ cum+=thr; thr=Math.floor(thr*1.5); }
+  return Math.min(((xp-cum)/thr)*100, 100);
 }
 
-// ══════════════════════════════════════════
-// EDGE FUNCTION CALLER
-// ══════════════════════════════════════════
-async function callFn(name, body = {}) {
-  const { data: { session } } = await sb.auth.getSession();
-  if (!session) throw new Error('Tidak terautentikasi');
-  const res = await fetch(`${FUNCTIONS_BASE}/${name}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': 'Bearer ' + session.access_token,
-    },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json();
-  if (!data.success) throw new Error(data.error || 'Server error');
-  return data;
-}
+// ── CAPTCHA ──────────────────────────────────────────────
+var CAPTCHA_CHARS='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+var _captchaCode='';
 
-// ══════════════════════════════════════════
-// CAPTCHA (pixel canvas, no external dependency)
-// ══════════════════════════════════════════
-const CAPTCHA_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-let _captchaCode = '';
-
-function generateCaptcha() {
-  _captchaCode = Array.from({length: 5}, () =>
-    CAPTCHA_CHARS[Math.floor(Math.random() * CAPTCHA_CHARS.length)]
-  ).join('');
-
-  const canvas = $('captchaCanvas');
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  const W = canvas.width, H = canvas.height;
-
-  // Background — dark pixel grid aesthetic
-  ctx.fillStyle = '#1a1a2e';
-  ctx.fillRect(0, 0, W, H);
-
-  // Noise pixels
-  for (let i = 0; i < 220; i++) {
-    ctx.fillStyle = `rgba(${Math.random()*200+55},${Math.random()*200+55},${Math.random()*200+55},${Math.random()*.5+.1})`;
-    ctx.fillRect(Math.floor(Math.random()*W), Math.floor(Math.random()*H), 2, 2);
+function generateCaptcha(){
+  _captchaCode='';
+  for(var i=0;i<5;i++) _captchaCode+=CAPTCHA_CHARS[Math.floor(Math.random()*CAPTCHA_CHARS.length)];
+  var canvas=$('captchaCanvas'); if(!canvas) return;
+  var ctx=canvas.getContext('2d'), W=canvas.width, H=canvas.height;
+  ctx.fillStyle='#1a1a2e'; ctx.fillRect(0,0,W,H);
+  for(var n=0;n<200;n++){
+    ctx.fillStyle='rgba('+Math.floor(Math.random()*200+55)+','+Math.floor(Math.random()*200+55)+','+Math.floor(Math.random()*200+55)+','+(Math.random()*.4+.1)+')';
+    ctx.fillRect(Math.floor(Math.random()*W),Math.floor(Math.random()*H),2,2);
   }
-
-  // Interference lines
-  for (let i = 0; i < 4; i++) {
-    ctx.strokeStyle = `rgba(${80+Math.random()*120},${200+Math.random()*55},${100+Math.random()*100},.4)`;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(Math.random()*W, Math.random()*H);
-    ctx.bezierCurveTo(Math.random()*W, Math.random()*H, Math.random()*W, Math.random()*H, Math.random()*W, Math.random()*H);
+  for(var n=0;n<3;n++){
+    ctx.strokeStyle='rgba(100,200,150,.4)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(Math.random()*W,Math.random()*H);
+    ctx.bezierCurveTo(Math.random()*W,Math.random()*H,Math.random()*W,Math.random()*H,Math.random()*W,Math.random()*H);
     ctx.stroke();
   }
-
-  // Draw each character with random tilt + color
-  const colors = ['#00e5ff','#69ff47','#ff6e40','#ea80fc','#ffd740','#40c4ff'];
-  ctx.textBaseline = 'middle';
-  _captchaCode.split('').forEach((ch, i) => {
-    const x = 14 + i * 24;
-    const y = H/2 + (Math.random()*8 - 4);
-    const angle = (Math.random() - 0.5) * 0.45;
-    const size = 20 + Math.floor(Math.random() * 5);
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.rotate(angle);
-    // Shadow
-    ctx.shadowColor = 'rgba(0,0,0,.8)';
-    ctx.shadowBlur = 3;
-    // Pixel-style font with stroke
-    ctx.font = `900 ${size}px 'Courier New', monospace`;
-    ctx.strokeStyle = '#000';
-    ctx.lineWidth = 3;
-    ctx.strokeText(ch, 0, 0);
-    ctx.fillStyle = colors[i % colors.length];
-    ctx.fillText(ch, 0, 0);
+  var colors=['#00e5ff','#69ff47','#ff6e40','#ea80fc','#ffd740'];
+  ctx.textBaseline='middle';
+  for(var i=0;i<_captchaCode.length;i++){
+    var x=14+i*24, y=H/2+(Math.random()*8-4), angle=(Math.random()-.5)*.4, size=20+Math.floor(Math.random()*4);
+    ctx.save(); ctx.translate(x,y); ctx.rotate(angle);
+    ctx.shadowColor='rgba(0,0,0,.8)'; ctx.shadowBlur=3;
+    ctx.font='900 '+size+'px Courier New,monospace';
+    ctx.strokeStyle='#000'; ctx.lineWidth=3; ctx.strokeText(_captchaCode[i],0,0);
+    ctx.fillStyle=colors[i%colors.length]; ctx.fillText(_captchaCode[i],0,0);
     ctx.restore();
-  });
-
-  // Extra foreground noise
-  for (let i = 0; i < 60; i++) {
-    ctx.fillStyle = `rgba(255,255,255,${Math.random()*.12})`;
-    ctx.fillRect(Math.floor(Math.random()*W), Math.floor(Math.random()*H), 3, 1);
   }
-
-  // Reset captcha input
-  const inp = $('captchaInput');
-  if (inp) { inp.value = ''; inp.classList.remove('captcha-ok'); }
+  var ci=$('captchaInput'); if(ci){ ci.value=''; ci.classList.remove('captcha-ok'); }
 }
 
-function validateCaptcha() {
-  const val = ($('captchaInput')?.value || '').toUpperCase().trim();
-  return val === _captchaCode;
+function validateCaptcha(){
+  var v=($('captchaInput')?$('captchaInput').value:'').toUpperCase().trim();
+  return v===_captchaCode;
 }
 
-// ══════════════════════════════════════════
-// AUTH — REGISTER
-// ══════════════════════════════════════════
-function showRegister() {
-  $('registerCard').style.display = 'block';
-  $('loginCard').style.display    = 'none';
+// ── AUTH ─────────────────────────────────────────────────
+function showRegister(){
+  var r=$('registerCard'), l=$('loginCard');
+  if(r) r.style.display='block';
+  if(l) l.style.display='none';
   generateCaptcha();
 }
-
-function showLogin() {
-  $('registerCard').style.display = 'none';
-  $('loginCard').style.display    = 'block';
+function showLogin(){
+  var r=$('registerCard'), l=$('loginCard');
+  if(r) r.style.display='none';
+  if(l) l.style.display='block';
 }
 
-function parseBirthdate(raw) {
-  // Accept DD/MM/YY or DDMMYY
-  const clean = raw.replace(/\D/g,'');
-  if (clean.length !== 6) return null;
-  const d = parseInt(clean.slice(0,2));
-  const m = parseInt(clean.slice(2,4));
-  const y = parseInt(clean.slice(4,6));
-  if (d < 1 || d > 31 || m < 1 || m > 12) return null;
-  const fullYear = y >= 0 && y <= 30 ? 2000+y : 1900+y;
-  return new Date(fullYear, m-1, d);
+function parseBirthdate(raw){
+  var clean=raw.replace(/[^0-9]/g,'');
+  if(clean.length!==6) return null;
+  var d=parseInt(clean.slice(0,2)), m=parseInt(clean.slice(2,4)), y=parseInt(clean.slice(4,6));
+  if(d<1||d>31||m<1||m>12) return null;
+  var fy=y>=0&&y<=30?2000+y:1900+y;
+  return new Date(fy,m-1,d);
 }
 
-async function doRegister() {
-  const btn      = $('regBtn');
-  const errEl    = $('regError');
-  errEl.textContent = '';
-  errEl.style.color = 'var(--red)';
-
-  const username = ($('regUsername')?.value || '').trim();
-  const email    = ($('regEmail')?.value || '').trim();
-  const password = $('regPassword')?.value || '';
-  const repeat   = $('regRepeat')?.value || '';
-  const birth    = ($('regBirth')?.value || '').trim();
-
-  // Validations
-  if (!username || username.length < 3) { errEl.textContent = 'Username minimal 3 karakter.'; return; }
-  if (!/^[a-zA-Z0-9_]+$/.test(username)) { errEl.textContent = 'Username hanya boleh huruf, angka, dan _'; return; }
-  if (!email || !/\S+@\S+\.\S+/.test(email)) { errEl.textContent = 'Format email tidak valid.'; return; }
-  if (password.length < 6) { errEl.textContent = 'Password minimal 6 karakter.'; return; }
-  if (password !== repeat) { errEl.textContent = 'Password tidak cocok.'; return; }
-  if (!birth) { errEl.textContent = 'Isi tanggal lahir.'; return; }
-  if (!parseBirthdate(birth)) { errEl.textContent = 'Format tanggal lahir: DD/MM/YY (contoh: 15/06/98).'; return; }
-  if (!validateCaptcha()) {
-    errEl.textContent = 'Kode verifikasi salah. Coba lagi.';
-    generateCaptcha();
-    return;
-  }
-
-  btn.disabled = true; btn.textContent = 'Mendaftar…';
+async function doRegister(){
+  var btn=$('regBtn'), errEl=$('regError');
+  if(!btn||!errEl) return;
+  errEl.textContent=''; errEl.style.color='var(--red)';
+  var username=($('regUsername')?$('regUsername').value:'').trim();
+  var email=($('regEmail')?$('regEmail').value:'').trim();
+  var password=$('regPassword')?$('regPassword').value:'';
+  var repeat=$('regRepeat')?$('regRepeat').value:'';
+  var birth=($('regBirth')?$('regBirth').value:'').trim();
+  if(!username||username.length<3){ errEl.textContent='Username minimal 3 karakter.'; return; }
+  if(!/^[a-zA-Z0-9_]+$/.test(username)){ errEl.textContent='Username hanya boleh huruf, angka, dan _'; return; }
+  if(!email||!/\S+@\S+\.\S+/.test(email)){ errEl.textContent='Format email tidak valid.'; return; }
+  if(password.length<6){ errEl.textContent='Password minimal 6 karakter.'; return; }
+  if(password!==repeat){ errEl.textContent='Password tidak cocok.'; return; }
+  if(!birth){ errEl.textContent='Isi tanggal lahir.'; return; }
+  if(!parseBirthdate(birth)){ errEl.textContent='Format: DD/MM/YY (contoh: 15/06/98)'; return; }
+  if(!validateCaptcha()){ errEl.textContent='Kode verifikasi salah. Coba lagi.'; generateCaptcha(); return; }
+  btn.disabled=true; btn.textContent='Mendaftar…';
   try {
-    const bdate = parseBirthdate(birth);
-    const { error } = await sb.auth.signUp({
-      email,
-      password,
-      options: {
-        data: {
-          username,
-          birthdate: bdate ? bdate.toISOString().split('T')[0] : null,
-        },
-      },
-    });
-    if (error) throw error;
-    // Success — Supabase will fire onAuthStateChange SIGNED_IN
-    // If email confirmation is disabled in Supabase, user is logged in immediately
-    errEl.style.color = '#43a047';
-    errEl.textContent = '✓ Berhasil! Membuka beranda…';
-  } catch (err) {
-    const msg = err.message;
-    if (msg.includes('User already registered') || msg.includes('already been registered'))
-      errEl.textContent = 'Email sudah terdaftar. Coba masuk.';
-    else if (msg.includes('Password should be'))
-      errEl.textContent = 'Password terlalu lemah. Gunakan minimal 6 karakter.';
-    else errEl.textContent = msg;
-    btn.disabled = false; btn.textContent = 'Daftar Sekarang';
+    var bdate=parseBirthdate(birth);
+    var res=await sb.auth.signUp({ email, password, options:{ data:{ username, birthdate:bdate?bdate.toISOString().split('T')[0]:null } } });
+    if(res.error) throw res.error;
+    errEl.style.color='#43a047'; errEl.textContent='✓ Berhasil! Membuka beranda…';
+  } catch(err){
+    var msg=err.message||'';
+    if(msg.includes('already registered')||msg.includes('already been registered')) errEl.textContent='Email sudah terdaftar. Coba masuk.';
+    else if(msg.includes('Password')) errEl.textContent='Password terlalu lemah.';
+    else errEl.textContent=msg;
+    btn.disabled=false; btn.textContent='Daftar Sekarang';
     generateCaptcha();
   }
 }
 
-// ══════════════════════════════════════════
-// AUTH — LOGIN
-// ══════════════════════════════════════════
-async function doLogin() {
-  const btn    = $('loginBtn');
-  const errEl  = $('loginError');
-  errEl.textContent = '';
-  errEl.style.color = 'var(--red)';
-
-  const email    = ($('loginEmail')?.value || '').trim();
-  const password = $('loginPassword')?.value || '';
-
-  if (!email || !password) { errEl.textContent = 'Isi email dan password.'; return; }
-  if (password.length < 6) { errEl.textContent = 'Password minimal 6 karakter.'; return; }
-
-  btn.disabled = true; btn.textContent = 'Masuk…';
+async function doLogin(){
+  var btn=$('loginBtn'), errEl=$('loginError');
+  if(!btn||!errEl) return;
+  errEl.textContent=''; errEl.style.color='var(--red)';
+  var email=($('loginEmail')?$('loginEmail').value:'').trim();
+  var password=$('loginPassword')?$('loginPassword').value:'';
+  if(!email||!password){ errEl.textContent='Isi email dan password.'; return; }
+  if(password.length<6){ errEl.textContent='Password minimal 6 karakter.'; return; }
+  btn.disabled=true; btn.textContent='Masuk…';
   try {
-    const { error } = await sb.auth.signInWithPassword({ email, password });
-    if (error) throw error;
-    // Success — onAuthStateChange handles redirect
-  } catch (err) {
-    const msg = err.message;
-    if (msg.includes('Invalid login credentials') || msg.includes('invalid_credentials'))
-      errEl.textContent = 'Email atau password salah.';
-    else if (msg.includes('Email not confirmed'))
-      errEl.textContent = 'Cek email kamu untuk konfirmasi akun.';
-    else errEl.textContent = msg;
+    var res=await sb.auth.signInWithPassword({ email, password });
+    if(res.error) throw res.error;
+  } catch(err){
+    var msg=err.message||'';
+    if(msg.includes('Invalid login credentials')||msg.includes('invalid_credentials')) errEl.textContent='Email atau password salah.';
+    else if(msg.includes('Email not confirmed')) errEl.textContent='Cek email kamu untuk konfirmasi.';
+    else errEl.textContent=msg;
   } finally {
-    btn.disabled = false; btn.textContent = 'Masuk';
+    btn.disabled=false; btn.textContent='Masuk';
   }
 }
 
-async function doSignOut() {
+async function doSignOut(){
   await sb.auth.signOut();
-  S = { user:null, profile:null, farmSlots:[], inventory:[], plants:[], quests:[], spinType:'coin', bet:10, spinHistory:[], pendingSlot:null };
-  _realtimeSubs.forEach(s => s?.unsubscribe?.());
+  S={user:null,profile:null,farmSlots:[],inventory:[],plants:[],quests:[],spinType:'coin',bet:10,spinHistory:[],pendingSlot:null};
+  _realtimeSubs.forEach(function(s){ if(s&&s.unsubscribe) s.unsubscribe(); });
   clearInterval(_farmTimer);
-  $('authScreen').style.display = 'flex';
-  $('topHeader').style.display = 'none';
-  $('bottomNav').style.display = 'none';
-  // Reset to farm page
-  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  $('page-farm')?.classList.add('active');
-  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-  $('nav-farm')?.classList.add('active');
+  var auth=$('authScreen'), top=$('topHeader'), nav=$('bottomNav');
+  if(auth) auth.style.display='flex';
+  if(top) top.style.display='none';
+  if(nav) nav.style.display='none';
+  document.querySelectorAll('.page').forEach(function(p){ p.classList.remove('active'); });
+  var fp=$('page-farm'); if(fp) fp.classList.add('active');
+  document.querySelectorAll('.nav-btn').forEach(function(b){ b.classList.remove('active'); });
+  var nb=$('nav-farm'); if(nb) nb.classList.add('active');
+  showRegister();
 }
 
-// ══════════════════════════════════════════
-// GAME INIT
-// ══════════════════════════════════════════
-async function initGame(user) {
-  S.user = user;
-  $('authScreen').style.display = 'none';
-  $('topHeader').style.display = 'block';
-  $('bottomNav').style.display = 'flex';
-
-  // Load all data in parallel
+// ── GAME INIT ────────────────────────────────────────────
+async function initGame(user){
+  S.user=user;
+  var auth=$('authScreen'), top=$('topHeader'), nav=$('bottomNav');
+  if(auth) auth.style.display='none';
+  if(top) top.style.display='block';
+  if(nav) nav.style.display='flex';
+  var fg=$('farmGrid'); if(fg) fg.innerHTML='<div class="loading-txt" style="grid-column:1/6">Memuat sawah…</div>';
   try {
-    const [profile, slots, inv, plants] = await Promise.all([
-      sb.from('users').select('*').eq('id', user.id).single().then(r => r.data),
-      sb.from('farm_slots').select('*, plant:plant_key(*)').eq('user_id', user.id).order('slot_index').then(r => r.data || []),
-      sb.from('inventory').select('*, plant:plant_key(*)').eq('user_id', user.id).gt('quantity', 0).then(r => r.data || []),
-      sb.from('plants').select('*').order('unlock_level').then(r => r.data || []),
+    var uid=user.id;
+    var results=await Promise.all([
+      sb.from('users').select('*').eq('id',uid).single(),
+      sb.from('farm_slots').select('*, plant:plant_key(key,name,icon,rarity,base_yield,growth_time)').eq('user_id',uid).order('slot_index'),
+      sb.from('inventory').select('*, plant:plant_key(key,name,icon,rarity,base_yield,growth_time,price)').eq('user_id',uid).gt('quantity',0),
+      sb.from('plants').select('*').order('unlock_level'),
     ]);
-    S.profile = profile || {};
-    S.farmSlots = slots;
-    S.inventory = inv;
-    S.plants = plants;
-  } catch (e) {
-    toast('Gagal memuat data: ' + e.message);
-    return;
-  }
-
-  renderHUD();
-  renderFarm();
-  loadQuests();
-  setupRealtime(user.id);
-
-  // Farm timer (update countdowns every second)
+    S.profile=results[0].data||{};
+    S.farmSlots=results[1].data||[];
+    S.inventory=results[2].data||[];
+    S.plants=results[3].data||[];
+  } catch(e){ toast('Gagal memuat: '+e.message); return; }
+  renderHUD(); renderFarm(); loadQuests(); setupRealtime(user.id);
   clearInterval(_farmTimer);
-  _farmTimer = setInterval(() => {
-    if ($('page-farm')?.classList.contains('active')) renderFarm();
-  }, 1000);
+  _farmTimer=setInterval(function(){
+    if($('page-farm')&&$('page-farm').classList.contains('active')) renderFarm();
+  },1000);
 }
 
-// ══════════════════════════════════════════
-// REALTIME
-// ══════════════════════════════════════════
-function setupRealtime(userId) {
-  _realtimeSubs.forEach(s => s?.unsubscribe?.());
-  _realtimeSubs = [
-    sb.channel('farm:'+userId)
-      .on('postgres_changes',{event:'*',schema:'public',table:'farm_slots',filter:`user_id=eq.${userId}`},
-        payload => {
-          const idx = S.farmSlots.findIndex(s => s.id === payload.new?.id);
-          if (idx >= 0) S.farmSlots[idx] = { ...S.farmSlots[idx], ...payload.new };
-          else if (payload.eventType === 'INSERT') S.farmSlots.push(payload.new);
-          renderFarm();
-        })
-      .subscribe(),
-    sb.channel('user:'+userId)
-      .on('postgres_changes',{event:'UPDATE',schema:'public',table:'users',filter:`id=eq.${userId}`},
-        payload => { S.profile = { ...S.profile, ...payload.new }; renderHUD(); renderProfileStats(); })
-      .subscribe(),
-    sb.channel('inv:'+userId)
-      .on('postgres_changes',{event:'*',schema:'public',table:'inventory',filter:`user_id=eq.${userId}`},
-        payload => {
-          const idx = S.inventory.findIndex(i => i.plant_key === payload.new?.plant_key);
-          if (idx >= 0) S.inventory[idx] = { ...S.inventory[idx], ...payload.new };
-          else if (payload.eventType === 'INSERT') S.inventory.push(payload.new);
-          // Remove zero-quantity
-          S.inventory = S.inventory.filter(i => i.quantity > 0);
-        })
-      .subscribe(),
+// ── REALTIME ─────────────────────────────────────────────
+function setupRealtime(uid){
+  _realtimeSubs.forEach(function(s){ if(s&&s.unsubscribe) s.unsubscribe(); });
+  _realtimeSubs=[
+    sb.channel('farm:'+uid).on('postgres_changes',{event:'*',schema:'public',table:'farm_slots',filter:'user_id=eq.'+uid},function(p){
+      if(!p.new) return;
+      var idx=S.farmSlots.findIndex(function(s){ return s.id===p.new.id; });
+      if(idx>=0) Object.assign(S.farmSlots[idx],p.new);
+      else if(p.eventType==='INSERT') S.farmSlots.push(p.new);
+      renderFarm();
+    }).subscribe(),
+    sb.channel('user:'+uid).on('postgres_changes',{event:'UPDATE',schema:'public',table:'users',filter:'id=eq.'+uid},function(p){
+      if(p.new) Object.assign(S.profile,p.new); renderHUD();
+    }).subscribe(),
   ];
 }
 
-// ══════════════════════════════════════════
-// HUD
-// ══════════════════════════════════════════
-function renderHUD() {
-  const p = S.profile || {};
-  setText('coinDisplay', fmtCoins(p.coins ?? 0));
-  setText('levelDisplay', 'Lv ' + (p.level ?? 1));
-  const pct = xpPercent(p.xp ?? 0, p.level ?? 1);
-  const xf = $('xpFill'); if (xf) xf.style.width = pct + '%';
+// ── HUD ──────────────────────────────────────────────────
+function renderHUD(){
+  var p=S.profile||{};
+  setText('coinDisplay',fmtCoins(p.coins||0));
+  setText('levelDisplay','Lv '+(p.level||1));
+  var pct=xpPercent(p.xp||0,p.level||1);
+  var xf=$('xpFill'); if(xf) xf.style.width=pct+'%';
 }
 
-// ══════════════════════════════════════════
-// NAVIGATION
-// ══════════════════════════════════════════
-function switchPage(page) {
-  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-  $('page-' + page)?.classList.add('active');
-  $('nav-' + page)?.classList.add('active');
-  if (page === 'store') { renderShop(); }
-  if (page === 'profile') { renderProfilePage(); }
+// ── NAVIGATION ───────────────────────────────────────────
+function switchPage(page){
+  document.querySelectorAll('.page').forEach(function(p){ p.classList.remove('active'); });
+  document.querySelectorAll('.nav-btn').forEach(function(b){ b.classList.remove('active'); });
+  var pg=$('page-'+page); if(pg) pg.classList.add('active');
+  var nb=$('nav-'+page); if(nb) nb.classList.add('active');
+  if(page==='store') renderShop();
+  if(page==='profile') renderProfilePage();
 }
 
-// ══════════════════════════════════════════
-// FARM RENDER
-// ══════════════════════════════════════════
-function renderFarm() {
-  const grid = $('farmGrid'); if (!grid) return;
-  if (!S.farmSlots.length) {
-    grid.innerHTML = '<div class="loading-txt" style="grid-column:1/6">Memuat sawah…</div>';
-    return;
+// ── FARM ─────────────────────────────────────────────────
+function renderFarm(){
+  var grid=$('farmGrid'); if(!grid) return;
+  if(!S.farmSlots.length){
+    grid.innerHTML='<div class="loading-txt" style="grid-column:1/6">Memuat sawah…</div>'; return;
   }
-  grid.innerHTML = '';
-  const now = Date.now();
-  S.farmSlots.forEach(slot => {
-    const div = document.createElement('div');
-    div.className = 'plot';
-    div.id = 'slot-' + slot.slot_index;
-
-    if (!slot.plant_key) {
+  grid.innerHTML='';
+  var now=Date.now(), anyGrow=false;
+  S.farmSlots.forEach(function(slot){
+    var div=document.createElement('div');
+    div.className='plot'; div.id='slot-'+slot.slot_index;
+    if(!slot.plant_key){
       div.classList.add('empty');
-      div.innerHTML = '<div class="plot-empty-icon">＋</div>';
-      div.onclick = () => openInvPicker(slot.slot_index);
+      div.innerHTML='<div class="plot-empty-icon">＋</div>';
+      div.onclick=function(){ openInvPicker(slot.slot_index); };
     } else {
-      const plant = slot.plant;
-      const readyAt = new Date(slot.ready_at).getTime();
-      const plantedAt = new Date(slot.planted_at).getTime();
-      const total = readyAt - plantedAt;
-      const elapsed = now - plantedAt;
-      const prog = Math.min(elapsed / total, 1);
-      const isReady = now >= readyAt;
-
-      div.classList.add('planted');
-      if (isReady) div.classList.add('ready');
-
-      div.innerHTML = `
-        <div class="plot-icon" style="font-size:${1.3 + prog * 0.6}rem">${plant?.icon ?? '🌱'}</div>
-        <div class="plot-progress-bar">
-          <div class="plot-progress-fill" style="width:${prog*100}%"></div>
-        </div>
-        ${isReady
-          ? '<div class="plot-ready-badge">PANEN!</div>'
-          : `<div class="plot-timer">${fmtTime(Math.ceil((readyAt - now)/1000))}</div>`}
-      `;
-      div.onclick = () => isReady ? harvestSlot(slot.slot_index) : toast(`Belum siap — ${fmtTime(Math.ceil((readyAt - now)/1000))} lagi`);
+      var plant=slot.plant;
+      var ra=new Date(slot.ready_at).getTime(), pa=new Date(slot.planted_at).getTime();
+      var prog=Math.min((now-pa)/(ra-pa),1), isReady=now>=ra;
+      if(!isReady) anyGrow=true;
+      div.classList.add('planted'); if(isReady) div.classList.add('ready');
+      div.innerHTML='<div class="plot-icon" style="font-size:'+(1.3+prog*.6)+'rem">'+(plant?plant.icon:'🌱')+'</div>'
+        +'<div class="plot-progress-bar"><div class="plot-progress-fill" style="width:'+(prog*100)+'%"></div></div>'
+        +(isReady?'<div class="plot-ready-badge">PANEN!</div>':'<div class="plot-timer">'+fmtTime(Math.ceil((ra-now)/1000))+'</div>');
+      (function(si,ready,ra2,now2){ div.onclick=function(){ if(ready) harvestSlot(si); else toast('Belum siap — '+fmtTime(Math.ceil((ra2-now2)/1000))+' lagi'); }; })(slot.slot_index,isReady,ra,now);
     }
     grid.appendChild(div);
   });
+  if(anyGrow && !_farmTimer) _farmTimer=setInterval(function(){ if($('page-farm')&&$('page-farm').classList.contains('active')) renderFarm(); },1000);
 }
 
-// ══════════════════════════════════════════
-// HARVEST
-// ══════════════════════════════════════════
-async function harvestSlot(slotIndex) {
-  const btn = $('slot-' + slotIndex);
-  if (btn) { btn.style.opacity = '.5'; btn.style.pointerEvents = 'none'; }
+// ── HARVEST ──────────────────────────────────────────────
+async function harvestSlot(slotIdx){
+  var el=$('slot-'+slotIdx);
+  if(el){ el.style.opacity='.5'; el.style.pointerEvents='none'; }
   try {
-    const result = await callFn('claim-farm-reward', { slot_index: slotIndex });
-
+    // Gunakan RPC langsung — tidak perlu Edge Function
+    var uid=S.user.id;
+    var slotRes=await sb.from('farm_slots').select('*, plant:plant_key(*)').eq('user_id',uid).eq('slot_index',slotIdx).single();
+    var slot=slotRes.data;
+    if(!slot||!slot.plant_key) throw new Error('Slot kosong');
+    var now=new Date(), readyAt=new Date(slot.ready_at);
+    if(now<readyAt) throw new Error('Tanaman belum siap');
+    var plant=slot.plant;
+    var mult={common:1,rare:2,epic:5,legendary:10,limited:8}[plant.rarity]||1;
+    var over=Math.min(1+(now-readyAt)/(plant.growth_time*1000),2);
+    var reward=Math.floor(plant.base_yield*mult*over);
+    var xpGain=Math.floor(reward*.1);
+    var newCoins=(S.profile.coins||0)+reward;
+    var newXp=(S.profile.xp||0)+xpGain;
+    // Update DB
+    await Promise.all([
+      sb.from('users').update({coins:newCoins,xp:newXp}).eq('id',uid),
+      sb.from('farm_slots').update({plant_key:null,planted_at:null,ready_at:null}).eq('user_id',uid).eq('slot_index',slotIdx),
+      sb.from('coin_logs').insert({user_id:uid,amount:reward,balance_after:newCoins,source:'farm',metadata:{plant_key:plant.key,rarity:plant.rarity}}),
+    ]);
+    // Update quest progress
+    await sb.rpc('increment_quest_progress',{p_user_id:uid,p_stat_key:'harvests',p_amount:1}).catch(function(){});
     // Optimistic update
-    const i = S.farmSlots.findIndex(s => s.slot_index === slotIndex);
-    if (i >= 0) S.farmSlots[i] = { ...S.farmSlots[i], plant_key: null, planted_at: null, ready_at: null, plant: null };
-    if (S.profile) {
-      S.profile.coins = result.new_coins;
-      S.profile.xp = result.new_xp;
-      S.profile.level = result.new_level;
-    }
-    renderHUD();
-    renderFarm();
-    spawnCoinFly('+' + result.reward.toLocaleString() + '🪙', btn);
-    toast(`+${result.reward.toLocaleString()} koin! +${result.xp_gained} XP`);
-  } catch (err) {
-    toast('⚠ ' + err.message);
-    if (btn) { btn.style.opacity = '1'; btn.style.pointerEvents = 'auto'; }
-  }
+    S.profile.coins=newCoins; S.profile.xp=newXp;
+    var si=S.farmSlots.findIndex(function(s){ return s.slot_index===slotIdx; });
+    if(si>=0) Object.assign(S.farmSlots[si],{plant_key:null,planted_at:null,ready_at:null,plant:null});
+    renderHUD(); renderFarm();
+    spawnCoinFly('+'+reward.toLocaleString()+'🪙',el);
+    toast('+'+reward.toLocaleString()+' koin! +'+xpGain+' XP');
+  } catch(err){ toast('⚠ '+err.message); if(el){el.style.opacity='1';el.style.pointerEvents='auto';} }
 }
 
-// ══════════════════════════════════════════
-// INVENTORY PICKER → PLANT
-// ══════════════════════════════════════════
-function openInvPicker(slotIndex) {
-  S.pendingSlot = slotIndex;
-  const grid = $('invPickerGrid'); if (!grid) return;
-  const avail = S.inventory.filter(i => i.quantity > 0);
-  if (!avail.length) {
-    grid.innerHTML = '<div class="empty-txt" style="grid-column:1/4">Inventori kosong. Beli bibit di Toko!</div>';
+// ── INVENTORY PICKER ─────────────────────────────────────
+function openInvPicker(slotIdx){
+  S.pendingSlot=slotIdx;
+  var grid=$('invPickerGrid'); if(!grid) return;
+  var avail=S.inventory.filter(function(i){ return i.quantity>0; });
+  if(!avail.length){
+    grid.innerHTML='<div class="empty-txt" style="grid-column:1/4">Inventori kosong.<br>Beli bibit di Toko!</div>';
   } else {
-    grid.innerHTML = avail.map(item => `
-      <div class="inv-item ${item.plant?.rarity ?? 'common'}" onclick="plantInSlot('${item.plant_key}')">
-        <div class="inv-icon">${item.plant?.icon ?? '🌱'}</div>
-        <div class="inv-name">${item.plant?.name ?? item.plant_key}</div>
-        <div class="inv-qty">x${item.quantity}</div>
-      </div>
-    `).join('');
+    grid.innerHTML='';
+    avail.forEach(function(item){
+      var d=document.createElement('div');
+      d.className='inv-item '+(item.plant&&item.plant.rarity!=='common'?item.plant.rarity:'');
+      d.innerHTML='<div class="inv-icon">'+(item.plant?item.plant.icon:'🌱')+'</div>'
+        +'<div class="inv-name">'+(item.plant?item.plant.name:item.plant_key)+'</div>'
+        +'<div class="inv-qty">x'+item.quantity+'</div>';
+      (function(key){ d.onclick=function(){ plantInSlot(key); }; })(item.plant_key);
+      grid.appendChild(d);
+    });
   }
-  $('invModal')?.classList.add('open');
+  var m=$('invModal'); if(m) m.classList.add('open');
 }
 
-async function plantInSlot(plantKey) {
-  if (S.pendingSlot === null) return;
+async function plantInSlot(plantKey){
+  if(S.pendingSlot===null) return;
   closeModal('invModal');
-  const slotIndex = S.pendingSlot;
-  S.pendingSlot = null;
+  var slotIdx=S.pendingSlot; S.pendingSlot=null;
+  var uid=S.user.id;
   try {
-    const result = await callFn('plant-seed', { slot_index: slotIndex, plant_key: plantKey });
+    // Check slot
+    var slotRes=await sb.from('farm_slots').select('*').eq('user_id',uid).eq('slot_index',slotIdx).single();
+    if(slotRes.data&&slotRes.data.plant_key) throw new Error('Slot sudah terisi');
+    // Check inventory
+    var invItem=S.inventory.find(function(i){ return i.plant_key===plantKey&&i.quantity>0; });
+    if(!invItem) throw new Error('Tidak ada di inventori');
+    var plant=S.plants.find(function(p){ return p.key===plantKey; });
+    if(!plant) throw new Error('Data tanaman tidak ditemukan');
+    if((S.profile.level||1)<plant.unlock_level) throw new Error('Level belum cukup (butuh Lv'+plant.unlock_level+')');
+    var plantedAt=new Date(), readyAt=new Date(plantedAt.getTime()+plant.growth_time*1000);
+    await Promise.all([
+      sb.from('farm_slots').update({plant_key:plantKey,planted_at:plantedAt.toISOString(),ready_at:readyAt.toISOString()}).eq('user_id',uid).eq('slot_index',slotIdx),
+      sb.from('inventory').update({quantity:invItem.quantity-1}).eq('user_id',uid).eq('plant_key',plantKey),
+    ]);
+    await sb.rpc('increment_quest_progress',{p_user_id:uid,p_stat_key:'plants',p_amount:1}).catch(function(){});
     // Optimistic update
-    const si = S.farmSlots.findIndex(s => s.slot_index === slotIndex);
-    const plantData = S.plants.find(p => p.key === plantKey);
-    if (si >= 0) S.farmSlots[si] = { ...S.farmSlots[si], plant_key: plantKey, planted_at: result.planted_at, ready_at: result.ready_at, plant: plantData };
-    const ii = S.inventory.findIndex(i => i.plant_key === plantKey);
-    if (ii >= 0) { S.inventory[ii].quantity -= 1; if (S.inventory[ii].quantity <= 0) S.inventory.splice(ii, 1); }
+    var si=S.farmSlots.findIndex(function(s){ return s.slot_index===slotIdx; });
+    if(si>=0) Object.assign(S.farmSlots[si],{plant_key:plantKey,planted_at:plantedAt.toISOString(),ready_at:readyAt.toISOString(),plant:plant});
+    invItem.quantity--;
+    if(invItem.quantity<=0) S.inventory=S.inventory.filter(function(i){ return i.plant_key!==plantKey; });
     renderFarm();
-    toast((plantData?.icon ?? '🌱') + ' ' + (plantData?.name ?? plantKey) + ' ditanam!');
-  } catch (err) {
-    toast('⚠ ' + err.message);
-  }
+    toast((plant.icon||'🌱')+' '+plant.name+' ditanam!');
+  } catch(err){ toast('⚠ '+err.message); }
 }
 
-// ══════════════════════════════════════════
-// SHOP
-// ══════════════════════════════════════════
-function renderShop() {
-  const grid = $('shopGrid'); if (!grid) return;
-  if (!S.plants.length) { grid.innerHTML = '<div class="loading-txt">Memuat…</div>'; return; }
-  const lvl = S.profile?.level ?? 1;
-  const coins = S.profile?.coins ?? 0;
-  const rarityBadge = { common:'rb-common', rare:'rb-rare', epic:'rb-epic', legendary:'rb-legendary', limited:'rb-limited' };
+// ── SHOP ─────────────────────────────────────────────────
+function renderShop(){
+  var grid=$('shopGrid'); if(!grid) return;
+  if(!S.plants.length){ grid.innerHTML='<div class="loading-txt">Memuat…</div>'; return; }
+  var lv=S.profile?S.profile.level||1:1, coins=S.profile?S.profile.coins||0:0;
+  var rbMap={common:'rb-common',rare:'rb-rare',epic:'rb-epic',legendary:'rb-legendary',limited:'rb-limited'};
+  grid.innerHTML='';
+  S.plants.filter(function(p){ return !p.is_limited; }).forEach(function(plant){
+    var locked=plant.unlock_level>lv, canBuy=coins>=plant.price&&!locked;
+    var card=document.createElement('div');
+    card.className='shop-card '+(locked?'locked':plant.rarity);
+    card.innerHTML='<div class="shop-icon">'+plant.icon+'</div>'
+      +'<div class="shop-name">'+plant.name+'</div>'
+      +'<div><span class="rarity-badge '+(rbMap[plant.rarity]||'rb-common')+'">'+plant.rarity+'</span></div>'
+      +'<div class="shop-yield">+'+plant.base_yield+' koin/panen</div>'
+      +'<div class="shop-time">'+fmtTime(plant.growth_time)+'</div>'
+      +(locked?'<div class="shop-locked-tag">🔒 Level '+plant.unlock_level+'</div>'
+        :'<button class="shop-btn"'+(canBuy?'':' disabled')+' data-key="'+plant.key+'">'+plant.price.toLocaleString()+' 🪙</button>');
+    if(!locked){
+      var btn=card.querySelector('.shop-btn');
+      if(btn&&canBuy){
+        (function(key){ btn.onclick=function(){ doBuyPlant(key); }; })(plant.key);
+      }
+    }
+    grid.appendChild(card);
+  });
+}
 
-  grid.innerHTML = S.plants.filter(p => !p.is_limited).map(plant => {
-    const locked = plant.unlock_level > lvl;
-    const canBuy = coins >= plant.price && !locked;
-    return `
-      <div class="shop-card ${plant.rarity} ${locked ? 'locked' : ''}">
-        <div class="shop-icon">${plant.icon}</div>
-        <div class="shop-name">${plant.name}</div>
-        <div><span class="rarity-badge ${rarityBadge[plant.rarity] ?? 'rb-common'}">${plant.rarity}</span></div>
-        <div class="shop-yield">+${plant.base_yield} koin/panen</div>
-        <div class="shop-time">${fmtTime(plant.growth_time)}</div>
-        ${locked
-          ? `<div class="shop-locked-tag">🔒 Level ${plant.unlock_level}</div>`
-          : `<button class="shop-btn" ${canBuy ? '' : 'disabled'} onclick="doBuyPlant('${plant.key}')">
-               ${plant.price.toLocaleString()} 🪙
-             </button>`
-        }
-      </div>
-    `;
+async function doBuyPlant(plantKey){
+  try {
+    var res=await sb.rpc('buy_plant_from_shop',{p_plant_key:plantKey});
+    if(res.error) throw res.error;
+    if(!res.data||!res.data.success) throw new Error(res.data?res.data.error:'Gagal beli');
+    S.profile.coins=res.data.new_coins;
+    var plant=S.plants.find(function(p){ return p.key===plantKey; });
+    var ii=S.inventory.findIndex(function(i){ return i.plant_key===plantKey; });
+    if(ii>=0) S.inventory[ii].quantity++;
+    else S.inventory.push({plant_key:plantKey,quantity:1,plant:plant});
+    renderHUD(); renderShop();
+    toast('Bibit '+(plant?plant.name:plantKey)+' dibeli!');
+  } catch(err){ toast('⚠ '+err.message); }
+}
+
+// ── STORE TABS ───────────────────────────────────────────
+function switchStoreTab(tab, btn){
+  ['shop','gacha','market'].forEach(function(t){
+    var el=$('tab-'+t); if(el) el.style.display='none';
+  });
+  document.querySelectorAll('.tab-btn').forEach(function(b){ b.classList.remove('active'); });
+  var el=$('tab-'+tab); if(el) el.style.display='block';
+  if(btn) btn.classList.add('active');
+  if(tab==='market') renderMarket();
+}
+
+// ── MARKETPLACE ──────────────────────────────────────────
+async function renderMarket(){
+  var list=$('marketList'); if(!list) return;
+  list.innerHTML='<div class="loading-txt">Memuat…</div>';
+  try {
+    var res=await sb.from('marketplace').select('*, seller:seller_id(username), plant:plant_key(name,icon,rarity)').eq('status','active').order('created_at',{ascending:false}).limit(50);
+    if(!res.data||!res.data.length){ list.innerHTML='<div class="empty-txt">Marketplace kosong.</div>'; return; }
+    var myId=S.user?S.user.id:'', myCoins=S.profile?S.profile.coins||0:0;
+    list.innerHTML='';
+    res.data.forEach(function(l){
+      var own=l.seller_id===myId, canBuy=!own&&myCoins>=l.price;
+      var d=document.createElement('div'); d.className='market-item';
+      d.innerHTML='<div class="market-icon">'+(l.plant?l.plant.icon:'🌱')+'</div>'
+        +'<div class="market-info"><div class="market-name">'+(l.plant?l.plant.name:l.plant_key)+' x'+l.quantity+'</div>'
+        +'<div class="market-seller">@'+(l.seller?l.seller.username:'?')+'</div></div>'
+        +'<div class="market-price">'+l.price.toLocaleString()+' 🪙</div>'
+        +(own?'<div class="own-tag">Milikmu</div>':'<button class="market-buy-btn"'+(canBuy?'':' disabled')+' data-id="'+l.id+'">Beli</button>');
+      if(!own&&canBuy){
+        var buyBtn=d.querySelector('.market-buy-btn');
+        if(buyBtn)(function(id,price){ buyBtn.onclick=function(){ doBuyMarket(id,price); }; })(l.id,l.price);
+      }
+      list.appendChild(d);
+    });
+  } catch(e){ list.innerHTML='<div class="empty-txt">Gagal memuat.</div>'; }
+}
+
+async function doBuyMarket(listingId, price){
+  try {
+    // Get listing
+    var lr=await sb.from('marketplace').select('*').eq('id',listingId).eq('status','active').single();
+    if(!lr.data) throw new Error('Item sudah terjual');
+    var listing=lr.data, uid=S.user.id, sellerCoins=0;
+    // Get seller coins
+    var sr=await sb.from('users').select('coins').eq('id',listing.seller_id).single();
+    if(sr.data) sellerCoins=sr.data.coins||0;
+    var newBuyerCoins=(S.profile.coins||0)-listing.price;
+    if(newBuyerCoins<0) throw new Error('Koin tidak cukup');
+    var fee=Math.floor(listing.price*.05), sellerGets=listing.price-fee;
+    await Promise.all([
+      sb.from('users').update({coins:newBuyerCoins}).eq('id',uid),
+      sb.from('users').update({coins:sellerCoins+sellerGets}).eq('id',listing.seller_id),
+      sb.from('marketplace').update({status:'sold',sold_at:new Date().toISOString()}).eq('id',listingId),
+    ]);
+    // Add to inventory
+    var ii=S.inventory.findIndex(function(i){ return i.plant_key===listing.plant_key; });
+    if(ii>=0){
+      await sb.from('inventory').update({quantity:S.inventory[ii].quantity+listing.quantity}).eq('user_id',uid).eq('plant_key',listing.plant_key);
+    } else {
+      await sb.from('inventory').insert({user_id:uid,plant_key:listing.plant_key,quantity:listing.quantity});
+    }
+    S.profile.coins=newBuyerCoins;
+    renderHUD(); renderMarket();
+    toast('Dibeli! -'+listing.price.toLocaleString()+' koin');
+  } catch(err){ toast('⚠ '+err.message); }
+}
+
+function openSellModal(){
+  var avail=S.inventory.filter(function(i){ return i.quantity>0; });
+  var sel=$('sellItem'); if(!sel) return;
+  if(!avail.length){ toast('Inventori kosong!'); return; }
+  sel.innerHTML='';
+  avail.forEach(function(i){
+    var opt=document.createElement('option');
+    opt.value=i.plant_key;
+    opt.textContent=(i.plant?i.plant.icon+' '+i.plant.name:i.plant_key)+' (x'+i.quantity+')';
+    sel.appendChild(opt);
+  });
+  var m=$('sellModal'); if(m) m.classList.add('open');
+}
+
+async function confirmSell(){
+  var plantKey=$('sellItem')?$('sellItem').value:'';
+  var qty=parseInt($('sellQty')?$('sellQty').value:0);
+  var price=parseInt($('sellPrice')?$('sellPrice').value:0);
+  if(!plantKey||qty<1||price<1){ toast('Isi semua field dengan benar'); return; }
+  var invItem=S.inventory.find(function(i){ return i.plant_key===plantKey; });
+  if(!invItem||invItem.quantity<qty){ toast('Stok tidak cukup'); return; }
+  try {
+    var res=await sb.from('marketplace').insert({seller_id:S.user.id,plant_key:plantKey,quantity:qty,price:price});
+    if(res.error) throw res.error;
+    // Deduct inventory
+    await sb.from('inventory').update({quantity:invItem.quantity-qty}).eq('user_id',S.user.id).eq('plant_key',plantKey);
+    invItem.quantity-=qty;
+    if(invItem.quantity<=0) S.inventory=S.inventory.filter(function(i){ return i.plant_key!==plantKey; });
+    closeModal('sellModal'); renderMarket();
+    toast('Item berhasil dijual di marketplace!');
+    await sb.rpc('increment_quest_progress',{p_user_id:S.user.id,p_stat_key:'sales',p_amount:1}).catch(function(){});
+  } catch(err){ toast('⚠ '+err.message); }
+}
+
+// ── GACHA ────────────────────────────────────────────────
+async function doGacha(){
+  var btn=$('gachaBtn'); if(!btn||btn.disabled) return;
+  btn.disabled=true; btn.textContent='Membuka…';
+  try {
+    var res=await sb.rpc('open_gacha_box',{p_user_id:S.user.id,p_box_type:'plant'});
+    if(res.error) throw res.error;
+    if(!res.data||!res.data.success) throw new Error(res.data?res.data.error:'Gagal buka box');
+    S.profile.coins=res.data.new_coins;
+    renderHUD();
+    var plant=S.plants.find(function(p){ return p.key===res.data.plant_key; });
+    var gi=$('gachaResultIcon'), gn=$('gachaResultName'), gr=$('gachaResultRarity'), go=$('gachaOverlay');
+    if(gi) gi.textContent=plant?plant.icon:'🌱';
+    if(gn) gn.textContent=plant?plant.name:res.data.plant_key;
+    var rbMap={common:'rb-common',rare:'rb-rare',epic:'rb-epic',legendary:'rb-legendary',limited:'rb-limited'};
+    if(gr) gr.innerHTML='<span class="rarity-badge '+(rbMap[plant?plant.rarity:'common']||'rb-common')+'">'+(plant?plant.rarity:'common')+'</span>';
+    if(go) go.style.display='flex';
+    // Update inv
+    var ii=S.inventory.findIndex(function(i){ return i.plant_key===res.data.plant_key; });
+    if(ii>=0) S.inventory[ii].quantity++;
+    else S.inventory.push({plant_key:res.data.plant_key,quantity:1,plant:plant});
+  } catch(err){ toast('⚠ '+err.message); }
+  finally { btn.disabled=false; btn.textContent='Buka Gacha Box — 1.000 🪙'; }
+}
+
+function closeGachaOverlay(){ var g=$('gachaOverlay'); if(g) g.style.display='none'; }
+
+// ── SPIN ─────────────────────────────────────────────────
+var SPIN_SYMBOLS={
+  coin:[
+    {icon:'🪙',type:'coin',val:50,w:400},{icon:'💰',type:'coin',val:200,w:250},
+    {icon:'💎',type:'coin',val:500,w:100},{icon:'🌟',type:'coin',val:1000,w:40},
+    {icon:'👑',type:'coin',val:5000,w:5},{icon:'❌',type:'nothing',val:0,w:205},
+  ],
+  plant:[
+    {icon:'🌸',type:'plant',val:'flower',w:300},{icon:'🍃',type:'plant',val:'leaf',w:250},
+    {icon:'🌻',type:'plant',val:'sun',w:200},{icon:'🥔',type:'plant',val:'potato',w:100},
+    {icon:'🎋',type:'plant',val:'bamboo',w:80},{icon:'💎',type:'rareplant',val:'crystalFlower',w:20},
+    {icon:'🔥',type:'nothing',val:0,w:50},
+  ],
+};
+function pickSym(syms){
+  var tot=syms.reduce(function(s,d){ return s+d.w; },0), r=Math.random()*tot, cum=0;
+  for(var i=0;i<syms.length;i++){ cum+=syms[i].w; if(r<cum) return syms[i]; }
+  return syms[syms.length-1];
+}
+
+function setSpinType(type,btn){
+  S.spinType=type;
+  document.querySelectorAll('.type-btn').forEach(function(b){ b.classList.remove('active'); });
+  if(btn) btn.classList.add('active');
+}
+function setBet(val,btn){
+  S.bet=val;
+  document.querySelectorAll('.bet-btn').forEach(function(b){ b.classList.remove('active'); });
+  if(btn) btn.classList.add('active');
+  var cb=$('customBet'); if(cb) cb.value=val;
+}
+function setCustomBet(val){ S.bet=Math.max(10,parseInt(val)||10); document.querySelectorAll('.bet-btn').forEach(function(b){ b.classList.remove('active'); }); }
+
+async function doSpin(){
+  var btn=$('spinBtn'); if(!btn||btn.disabled) return;
+  if((S.profile.coins||0)<S.bet){ toast('Koin tidak cukup!'); return; }
+  btn.disabled=true; btn.textContent='⏳ Memutar…';
+  [0,1,2].forEach(function(i){ var r=$('reel'+i); if(r) r.classList.add('spin'); });
+  var syms=SPIN_SYMBOLS[S.spinType]||SPIN_SYMBOLS.coin;
+  var reels=[pickSym(syms),pickSym(syms),pickSym(syms)];
+  var allSame=reels[0].icon===reels[1].icon&&reels[1].icon===reels[2].icon&&reels[0].type!=='nothing';
+  var twoSame=(reels[0].icon===reels[1].icon||reels[1].icon===reels[2].icon||reels[0].icon===reels[2].icon)&&reels.some(function(r){ return r.type!=='nothing'; });
+  var payout=0, resultType='lose', reward=null;
+  if(allSame){
+    resultType='jackpot';
+    if(reels[0].type==='coin') payout=Math.floor(reels[0].val*S.bet/10);
+    else if(reels[0].type==='plant'||reels[0].type==='rareplant') reward=reels[0].val;
+  } else if(twoSame){
+    resultType='partial';
+    var win=reels[0].icon===reels[1].icon?reels[0]:reels[1].icon===reels[2].icon?reels[1]:reels[0];
+    if(win.type==='coin') payout=Math.floor(win.val*.5);
+  } else {
+    resultType='consolation'; payout=Math.floor(S.bet*.1)+Math.floor(Math.random()*30)+5;
+  }
+  var net=payout-S.bet, newCoins=(S.profile.coins||0)+net;
+  if(newCoins<0) newCoins=0;
+  // Update DB
+  try {
+    await Promise.all([
+      sb.from('users').update({coins:newCoins}).eq('id',S.user.id),
+      sb.from('spin_logs').insert({user_id:S.user.id,spin_type:S.spinType,bet:S.bet,result:{reels:reels.map(function(r){return r.icon;}),type:resultType},payout:net}),
+    ]);
+    if(reward){
+      var ii=S.inventory.findIndex(function(i){ return i.plant_key===reward; });
+      if(ii>=0){ await sb.from('inventory').update({quantity:S.inventory[ii].quantity+1}).eq('user_id',S.user.id).eq('plant_key',reward); S.inventory[ii].quantity++; }
+      else { await sb.from('inventory').insert({user_id:S.user.id,plant_key:reward,quantity:1}); var plt=S.plants.find(function(p){ return p.key===reward; }); S.inventory.push({plant_key:reward,quantity:1,plant:plt}); }
+    }
+    await sb.rpc('increment_quest_progress',{p_user_id:S.user.id,p_stat_key:'spins',p_amount:1}).catch(function(){});
+  } catch(e){}
+  setTimeout(function(){
+    [0,1,2].forEach(function(i){ var r=$('reel'+i); if(r){ r.classList.remove('spin'); r.textContent=reels[i].icon; } });
+    var labels={jackpot:'🎉 JACKPOT! '+(payout>0?'+'+payout.toLocaleString()+' koin':reward?'Dapat tanaman!':''),partial:'🌟 Menang! +'+payout.toLocaleString()+' koin',consolation:'😊 +'+payout.toLocaleString()+' koin',lose:'❌ Belum beruntung'};
+    var res=$('spinResult'); if(res){ res.textContent=labels[resultType]||''; res.style.color=net>0?'var(--gold)':'#ff8a80'; }
+    S.profile.coins=newCoins; renderHUD();
+    S.spinHistory.unshift({icons:reels.map(function(r){return r.icon;}),type:resultType,payout:net});
+    renderSpinHistory();
+    btn.disabled=false; btn.textContent='🎰 PUTAR SEKARANG';
+  },600);
+}
+
+function renderSpinHistory(){
+  var el=$('spinHistory'); if(!el) return;
+  if(!S.spinHistory.length){ el.innerHTML='<div class="empty-txt">Belum ada spin.</div>'; return; }
+  el.innerHTML=S.spinHistory.slice(0,8).map(function(h){
+    return '<div style="display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f5f5f5;">'
+      +'<span style="font-size:1.1rem;letter-spacing:3px;">'+h.icons.join('')+'</span>'
+      +'<span style="font-weight:800;font-size:.8rem;color:'+(h.payout>0?'#43a047':'#e53935')+'">'+(h.payout>0?'+':'')+h.payout.toLocaleString()+' 🪙</span></div>';
   }).join('');
 }
 
-async function doBuyPlant(plantKey) {
-  try {
-    const { data, error } = await sb.rpc('buy_plant_from_shop', { p_plant_key: plantKey });
-    if (error) throw error;
-    if (!data?.success) throw new Error(data?.error || 'Gagal beli');
-    // Update local
-    if (S.profile) S.profile.coins = data.new_coins;
-    const ii = S.inventory.findIndex(i => i.plant_key === plantKey);
-    if (ii >= 0) S.inventory[ii].quantity += 1;
-    else { const plant = S.plants.find(p => p.key === plantKey); S.inventory.push({ plant_key: plantKey, quantity: 1, plant }); }
-    renderHUD(); renderShop();
-    toast('Bibit ' + (S.plants.find(p=>p.key===plantKey)?.name ?? plantKey) + ' dibeli!');
-  } catch (err) { toast('⚠ ' + err.message); }
-}
-
-// ══════════════════════════════════════════
-// STORE TABS
-// ══════════════════════════════════════════
-function switchStoreTab(tab, btn) {
-  ['shop','gacha','market'].forEach(t => { const el = $('tab-'+t); if (el) el.style.display = 'none'; });
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-  const el = $('tab-'+tab); if (el) el.style.display = 'block';
-  btn?.classList.add('active');
-  if (tab === 'market') renderMarket();
-}
-
-// ══════════════════════════════════════════
-// MARKETPLACE
-// ══════════════════════════════════════════
-async function renderMarket() {
-  const list = $('marketList'); if (!list) return;
-  list.innerHTML = '<div class="loading-txt">Memuat…</div>';
-  try {
-    const { data } = await sb.from('marketplace')
-      .select('*, seller:seller_id(username), plant:plant_key(name,icon,rarity)')
-      .eq('status','active').order('created_at',{ascending:false}).limit(50);
-    if (!data?.length) { list.innerHTML = '<div class="empty-txt">Marketplace kosong.</div>'; return; }
-    const myId = S.user?.id;
-    list.innerHTML = data.map(l => `
-      <div class="market-item">
-        <div class="market-icon">${l.plant?.icon ?? '🌱'}</div>
-        <div class="market-info">
-          <div class="market-name">${l.plant?.name ?? l.plant_key} x${l.quantity}</div>
-          <div class="market-seller">@${l.seller?.username ?? '?'}</div>
-        </div>
-        <div class="market-price">${l.price.toLocaleString()} 🪙</div>
-        ${l.seller_id === myId
-          ? '<div class="own-tag">Milikmu</div>'
-          : `<button class="market-buy-btn" ${(S.profile?.coins??0)<l.price?'disabled':''} onclick="doBuyMarket('${l.id}')">Beli</button>`
-        }
-      </div>
-    `).join('');
-  } catch (e) { list.innerHTML = '<div class="empty-txt">Gagal memuat.</div>'; }
-}
-
-async function doBuyMarket(listingId) {
-  try {
-    const result = await callFn('marketplace-buy', { listing_id: listingId });
-    if (S.profile) S.profile.coins = result.new_coins;
-    renderHUD(); renderMarket();
-    toast('Item berhasil dibeli! -' + result.price_paid.toLocaleString() + ' koin');
-  } catch (err) { toast('⚠ ' + err.message); }
-}
-
-function openSellModal() {
-  const avail = S.inventory.filter(i => i.quantity > 0);
-  const sel = $('sellItem'); if (!sel) return;
-  if (!avail.length) { toast('Inventori kosong!'); return; }
-  sel.innerHTML = avail.map(i => `<option value="${i.plant_key}">${i.plant?.icon ?? ''} ${i.plant?.name ?? i.plant_key} (x${i.quantity})</option>`).join('');
-  $('sellModal')?.classList.add('open');
-}
-
-async function confirmSell() {
-  const plantKey = $('sellItem')?.value;
-  const qty = parseInt($('sellQty')?.value ?? '0');
-  const price = parseInt($('sellPrice')?.value ?? '0');
-  if (!plantKey || qty < 1 || price < 1) { toast('Isi semua field dengan benar'); return; }
-
-  try {
-    const { data, error } = await sb.from('marketplace').insert({
-      seller_id: S.user.id, plant_key: plantKey, quantity: qty, price,
-    });
-    if (error) throw error;
-    closeModal('sellModal');
-    renderMarket(); toast('Item berhasil dijual!');
-  } catch (err) { toast('⚠ ' + err.message); }
-}
-
-// ══════════════════════════════════════════
-// GACHA
-// ══════════════════════════════════════════
-async function doGacha() {
-  const btn = $('gachaBtn'); if (!btn || btn.disabled) return;
-  btn.disabled = true; btn.textContent = 'Membuka…';
-  try {
-    const { data, error } = await sb.rpc('open_gacha_box', { p_user_id: S.user.id });
-    if (error) throw error;
-    if (!data?.success) throw new Error(data?.error ?? 'Gagal');
-    if (S.profile) S.profile.coins = data.new_coins;
-    renderHUD();
-    // Show result
-    const plant = S.plants.find(p => p.key === data.plant_key);
-    $('gachaResultIcon').textContent = plant?.icon ?? '🌱';
-    $('gachaResultName').textContent = plant?.name ?? data.plant_key;
-    const rb = {common:'rb-common',rare:'rb-rare',epic:'rb-epic',legendary:'rb-legendary',limited:'rb-limited'};
-    $('gachaResultRarity').innerHTML = `<span class="rarity-badge ${rb[plant?.rarity]??'rb-common'}">${plant?.rarity ?? 'common'}</span>`;
-    $('gachaOverlay').style.display = 'flex';
-    // Update inventory cache
-    const ii = S.inventory.findIndex(i => i.plant_key === data.plant_key);
-    if (ii >= 0) S.inventory[ii].quantity += 1;
-    else S.inventory.push({ plant_key: data.plant_key, quantity: 1, plant });
-  } catch (err) { toast('⚠ ' + err.message); }
-  finally { btn.disabled = false; btn.textContent = 'Buka Gacha Box — 1.000 🪙'; }
-}
-
-function closeGachaOverlay() { $('gachaOverlay').style.display = 'none'; }
-
-// ══════════════════════════════════════════
-// SPIN
-// ══════════════════════════════════════════
-function setSpinType(type, btn) {
-  S.spinType = type;
-  document.querySelectorAll('.type-btn').forEach(b => b.classList.remove('active'));
-  btn?.classList.add('active');
-}
-
-function setBet(val, btn) {
-  S.bet = val;
-  document.querySelectorAll('.bet-btn').forEach(b => b.classList.remove('active'));
-  btn?.classList.add('active');
-  const cb = $('customBet'); if (cb) cb.value = val;
-}
-
-function setCustomBet(val) {
-  S.bet = Math.max(10, parseInt(val) || 10);
-  document.querySelectorAll('.bet-btn').forEach(b => b.classList.remove('active'));
-}
-
-async function doSpin() {
-  const btn = $('spinBtn'); if (!btn || btn.disabled) return;
-  btn.disabled = true; btn.textContent = '⏳ Memutar…';
-  // Reel spin animation
-  [0,1,2].forEach(i => $('reel'+i)?.classList.add('spin'));
-  try {
-    const result = await callFn('spin-wheel', { spin_type: S.spinType, bet: S.bet });
-    setTimeout(() => {
-      [0,1,2].forEach(i => {
-        const el = $('reel'+i); if (!el) return;
-        el.classList.remove('spin');
-        el.textContent = result.reels[i]?.icon ?? '❓';
-      });
-      const labels = {
-        jackpot: `🎉 JACKPOT! ${result.payout > 0 ? '+' + result.payout.toLocaleString() : ''}`,
-        partial: `🌟 Menang! +${result.payout.toLocaleString()}`,
-        consolation: `😊 +${result.payout.toLocaleString()} koin`,
-        lose: '❌ Belum beruntung',
-      };
-      const res = $('spinResult');
-      if (res) { res.textContent = labels[result.result_type] ?? ''; res.style.color = result.payout > 0 ? 'var(--gold)' : '#ff8a80'; }
-      if (S.profile) S.profile.coins = result.new_coins;
-      renderHUD();
-      S.spinHistory.unshift({ icons: result.reels.map(r=>r.icon), type: result.result_type, payout: result.payout });
-      renderSpinHistory();
-    }, 500);
-  } catch (err) {
-    [0,1,2].forEach(i => $('reel'+i)?.classList.remove('spin'));
-    const res = $('spinResult'); if (res) { res.textContent = '⚠ ' + err.message; res.style.color = '#ff8a80'; }
-  } finally {
-    setTimeout(() => { btn.disabled = false; btn.textContent = '🎰 PUTAR SEKARANG'; }, 600);
-  }
-}
-
-function renderSpinHistory() {
-  const el = $('spinHistory'); if (!el) return;
-  if (!S.spinHistory.length) { el.innerHTML = '<div class="empty-txt">Belum ada spin.</div>'; return; }
-  el.innerHTML = S.spinHistory.slice(0,8).map(h => `
-    <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f5f5f5;">
-      <span style="font-size:1.1rem;letter-spacing:3px;">${h.icons.join('')}</span>
-      <span style="font-weight:800;font-size:.8rem;color:${h.payout>0?'#43a047':'#e53935'};">${h.payout>0?'+':''}${h.payout.toLocaleString()} 🪙</span>
-    </div>
-  `).join('');
-}
-
-// ══════════════════════════════════════════
-// PROFILE
-// ══════════════════════════════════════════
-async function renderProfilePage() {
-  const p = S.profile || {};
-  const u = S.user;
-  setText('profName', p.username ?? 'Petani');
-  setText('profEmail', u?.email ?? '');
-  setText('profLevel', 'Level ' + (p.level ?? 1));
-  setText('sCoins', (p.coins ?? 0).toLocaleString());
-  setText('sLevel', p.level ?? 1);
-  setText('sXp', (p.xp ?? 0).toLocaleString());
-  setText('sStreak', p.daily_streak ?? 0);
-  setText('xpInfo', (p.xp ?? 0) + ' XP');
-  const pct = xpPercent(p.xp ?? 0, p.level ?? 1);
-  const xf2 = $('xpFill2'); if (xf2) xf2.style.width = pct + '%';
-
+// ── PROFILE ──────────────────────────────────────────────
+async function renderProfilePage(){
+  var p=S.profile||{}, u=S.user||{};
+  setText('profName',p.username||'Petani');
+  setText('profEmail',u.email||'');
+  setText('profLevel','Level '+(p.level||1));
+  setText('sCoins',(p.coins||0).toLocaleString());
+  setText('sLevel',p.level||1);
+  setText('sXp',(p.xp||0).toLocaleString());
+  setText('sStreak',p.daily_streak||0);
+  setText('xpInfo',(p.xp||0)+' XP');
+  var pct=xpPercent(p.xp||0,p.level||1);
+  var xf2=$('xpFill2'); if(xf2) xf2.style.width=pct+'%';
   renderInventoryList();
   renderDailyCard();
 }
 
-function renderProfileStats() {
-  const p = S.profile || {};
-  setText('sCoins', (p.coins ?? 0).toLocaleString());
-  setText('sLevel', p.level ?? 1);
-  setText('sXp', (p.xp ?? 0).toLocaleString());
-  setText('sStreak', p.daily_streak ?? 0);
+function renderInventoryList(){
+  var el=$('invList'); if(!el) return;
+  var items=S.inventory.filter(function(i){ return i.quantity>0; });
+  setText('invCount',items.length+' item');
+  if(!items.length){ el.innerHTML='<div class="empty-txt" style="grid-column:1/4">Inventori kosong.</div>'; return; }
+  el.innerHTML='';
+  items.forEach(function(i){
+    var d=document.createElement('div');
+    d.className='inv-item '+(i.plant&&i.plant.rarity!=='common'?i.plant.rarity:'');
+    d.innerHTML='<div class="inv-icon">'+(i.plant?i.plant.icon:'🌱')+'</div>'
+      +'<div class="inv-name">'+(i.plant?i.plant.name:i.plant_key)+'</div>'
+      +'<div class="inv-qty">x'+i.quantity+'</div>';
+    el.appendChild(d);
+  });
 }
 
-function renderInventoryList() {
-  const el = $('invList'); if (!el) return;
-  const items = S.inventory.filter(i => i.quantity > 0);
-  setText('invCount', items.length + ' item');
-  if (!items.length) { el.innerHTML = '<div class="empty-txt" style="grid-column:1/4">Inventori kosong.</div>'; return; }
-  const rb = {common:'',rare:'rare',epic:'epic',legendary:'legendary',limited:'limited'};
-  el.innerHTML = items.map(i => `
-    <div class="inv-item ${rb[i.plant?.rarity]??''}">
-      <div class="inv-icon">${i.plant?.icon ?? '🌱'}</div>
-      <div class="inv-name">${i.plant?.name ?? i.plant_key}</div>
-      <div class="inv-qty">x${i.quantity}</div>
-    </div>
-  `).join('');
-}
-
-const DAILY_REWARDS = [
+var DAILY_REWARDS=[
   {day:1,type:'coin',val:100,icon:'🪙',label:'100 Koin'},
   {day:2,type:'coin',val:200,icon:'🪙',label:'200 Koin'},
   {day:3,type:'plant',val:'flower',icon:'🌸',label:'Bunga x1'},
@@ -1291,202 +1193,157 @@ const DAILY_REWARDS = [
   {day:7,type:'coin',val:1500,icon:'💰',label:'1.500 Koin'},
 ];
 
-function renderDailyCard() {
-  const p = S.profile || {};
-  const streak = (p.daily_streak ?? 0) % 7;
-  const lastClaim = p.last_daily_claim ? new Date(p.last_daily_claim) : null;
-  const hoursSince = lastClaim ? (Date.now() - lastClaim.getTime()) / 3_600_000 : 99;
-  const canClaim = hoursSince >= 24;
-
-  // Day strip
-  const strip = $('dayStrip');
-  if (strip) {
-    strip.innerHTML = DAILY_REWARDS.map((r, i) => {
-      const done = i < streak || (i === streak && !canClaim);
-      const today = i === streak;
-      return `
-        <div class="day-cell ${done?'done':''} ${today&&canClaim?'today':''}">
-          <div class="day-cell-icon">${r.icon}</div>
-          <div class="day-cell-lbl">H${i+1}</div>
-        </div>
-      `;
-    }).join('');
+function renderDailyCard(){
+  var p=S.profile||{};
+  var streak=(p.daily_streak||0)%7;
+  var lastClaim=p.last_daily_claim?new Date(p.last_daily_claim):null;
+  var hoursAgo=lastClaim?(Date.now()-lastClaim.getTime())/3600000:99;
+  var canClaim=hoursAgo>=24;
+  var strip=$('dayStrip');
+  if(strip){
+    strip.innerHTML='';
+    DAILY_REWARDS.forEach(function(r,i){
+      var done=i<streak||(i===streak&&!canClaim), today=i===streak;
+      var d=document.createElement('div');
+      d.className='day-cell'+(done?' done':'')+(today&&canClaim?' today':'');
+      d.innerHTML='<div class="day-cell-icon">'+r.icon+'</div><div class="day-cell-lbl">H'+(i+1)+'</div>';
+      strip.appendChild(d);
+    });
   }
-
-  const todayReward = DAILY_REWARDS[streak];
-  const info = $('dailyInfo');
-  const btn = $('dailyBtn');
-  if (canClaim) {
-    if (info) info.textContent = `Hadiah hari ini: ${todayReward.label}`;
-    if (btn) { btn.disabled = false; btn.textContent = 'Klaim ' + todayReward.label; }
-    setText('dailyBadge', 'Tersedia!');
+  var today=DAILY_REWARDS[streak], info=$('dailyInfo'), btn=$('dailyBtn');
+  if(canClaim){
+    if(info) info.textContent='Hadiah hari ini: '+today.label;
+    if(btn){ btn.disabled=false; btn.textContent='Klaim '+today.label; }
+    setText('dailyBadge','Tersedia!');
   } else {
-    const hoursLeft = Math.ceil(24 - hoursSince);
-    if (info) info.textContent = `Sudah diklaim. Kembali dalam ${hoursLeft} jam.`;
-    if (btn) { btn.disabled = true; btn.textContent = 'Sudah Diklaim Hari Ini'; }
-    setText('dailyBadge', hoursLeft + 'j lagi');
+    var hl=Math.ceil(24-hoursAgo);
+    if(info) info.textContent='Sudah diklaim. Kembali dalam '+hl+' jam.';
+    if(btn){ btn.disabled=true; btn.textContent='Sudah Diklaim'; }
+    setText('dailyBadge',hl+'j lagi');
   }
 }
 
-async function doDailyClaim() {
+async function doDailyClaim(){
+  var p=S.profile||{};
+  var streak=(p.daily_streak||0)%7;
+  var lastClaim=p.last_daily_claim?new Date(p.last_daily_claim):null;
+  var hoursAgo=lastClaim?(Date.now()-lastClaim.getTime())/3600000:99;
+  if(hoursAgo<24){ toast('Sudah diklaim! Kembali besok.'); return; }
+  var reward=DAILY_REWARDS[streak], uid=S.user.id;
   try {
-    const result = await callFn('daily-reward', {});
-    if (S.profile) {
-      S.profile.coins = result.new_coins;
-      S.profile.daily_streak = result.streak;
-      S.profile.last_daily_claim = new Date().toISOString();
+    var newCoins=(p.coins||0)+(reward.type==='coin'?reward.val:0);
+    var newStreak=(p.daily_streak||0)+1;
+    await sb.from('users').update({coins:newCoins,daily_streak:newStreak,last_daily_claim:new Date().toISOString()}).eq('id',uid);
+    if(reward.type==='plant'){
+      var ii=S.inventory.findIndex(function(i){ return i.plant_key===reward.val; });
+      if(ii>=0){ await sb.from('inventory').update({quantity:S.inventory[ii].quantity+1}).eq('user_id',uid).eq('plant_key',reward.val); S.inventory[ii].quantity++; }
+      else { await sb.from('inventory').insert({user_id:uid,plant_key:reward.val,quantity:1}); var plt=S.plants.find(function(p){ return p.key===reward.val; }); S.inventory.push({plant_key:reward.val,quantity:1,plant:plt}); }
     }
-    renderHUD(); renderProfileStats(); renderDailyCard();
-    toast(`Hadiah diklaim! ${result.reward.label} · Streak ${result.streak} hari 🔥`);
-  } catch (err) { toast('⚠ ' + err.message); }
+    S.profile.coins=newCoins; S.profile.daily_streak=newStreak; S.profile.last_daily_claim=new Date().toISOString();
+    renderHUD(); renderDailyCard();
+    toast('Hadiah diklaim! '+reward.label+' · Streak '+newStreak+' hari 🔥');
+    if(reward.type==='coin') spawnCoinFly('+'+reward.val+'🪙',null);
+  } catch(err){ toast('⚠ '+err.message); }
 }
 
-// ══════════════════════════════════════════
-// QUESTS
-// ══════════════════════════════════════════
-async function loadQuests() {
-  const list = $('questList'); if (!list) return;
+// ── QUESTS ───────────────────────────────────────────────
+async function loadQuests(){
+  var list=$('questList'); if(!list) return;
   try {
-    const { data: quests } = await sb.from('quests').select('*');
-    const userId = S.user?.id;
-    const { data: progress } = await sb.from('quest_progress').select('*').eq('user_id', userId);
-    const progMap = Object.fromEntries((progress ?? []).map(p => [p.quest_key, p]));
-
-    S.quests = (quests ?? []).map(q => ({ ...q, ...progMap[q.key] }));
-
-    const readyCount = S.quests.filter(q => q.completed && !q.claimed).length;
-    setText('questBadge', readyCount ? readyCount + ' siap!' : '');
-
-    list.innerHTML = S.quests.map(q => {
-      const prog = q.progress ?? 0;
-      const pct = Math.min((prog / q.target) * 100, 100);
-      return `
-        <div class="quest-item">
-          <div style="font-size:1.3rem;">🎯</div>
-          <div class="quest-info">
-            <div class="quest-title">${q.title}</div>
-            <div class="quest-meta">${prog}/${q.target} · +${q.reward_coins} koin +${q.reward_xp} XP</div>
-            <div class="quest-bar"><div class="quest-fill" style="width:${pct}%"></div></div>
-          </div>
-          ${q.completed && !q.claimed
-            ? `<button class="quest-claim-btn" onclick="doClaimQuest('${q.key}')">Klaim</button>`
-            : q.claimed ? '<div class="quest-claimed">✓</div>' : ''
-          }
-        </div>
-      `;
-    }).join('') || '<div class="empty-txt">Tidak ada misi.</div>';
-  } catch (e) { list.innerHTML = '<div class="empty-txt">Gagal memuat misi.</div>'; }
+    var uid=S.user?S.user.id:'';
+    var qRes=await sb.from('quests').select('*');
+    var pRes=await sb.from('quest_progress').select('*').eq('user_id',uid);
+    var progMap={};
+    (pRes.data||[]).forEach(function(p){ progMap[p.quest_key]=p; });
+    S.quests=(qRes.data||[]).map(function(q){ return Object.assign({},q,progMap[q.key]||{}); });
+    var ready=S.quests.filter(function(q){ return q.completed&&!q.claimed; }).length;
+    setText('questBadge',ready?ready+' siap!':'');
+    list.innerHTML='';
+    S.quests.forEach(function(q){
+      var prog=q.progress||0, pct=Math.min((prog/q.target)*100,100);
+      var d=document.createElement('div'); d.className='quest-item';
+      d.innerHTML='<div style="font-size:1.3rem;">🎯</div>'
+        +'<div class="quest-info"><div class="quest-title">'+q.title+'</div>'
+        +'<div class="quest-meta">'+prog+'/'+q.target+' · +'+q.reward_coins+' koin +'+q.reward_xp+' XP</div>'
+        +'<div class="quest-bar"><div class="quest-fill" style="width:'+pct+'%"></div></div></div>'
+        +(q.completed&&!q.claimed?'<button class="quest-claim-btn" data-key="'+q.key+'">Klaim</button>':q.claimed?'<div class="quest-claimed">✓</div>':'');
+      var claimBtn=d.querySelector('.quest-claim-btn');
+      if(claimBtn)(function(key){ claimBtn.onclick=function(){ doClaimQuest(key); }; })(q.key);
+      list.appendChild(d);
+    });
+    if(!S.quests.length) list.innerHTML='<div class="empty-txt">Tidak ada misi.</div>';
+  } catch(e){ list.innerHTML='<div class="empty-txt">Gagal memuat misi.</div>'; }
 }
 
-async function doClaimQuest(questKey) {
+async function doClaimQuest(questKey){
   try {
-    const { data, error } = await sb.rpc('claim_quest_reward', { p_user_id: S.user.id, p_quest_key: questKey });
-    if (error) throw error;
-    if (!data?.success) throw new Error(data?.error ?? 'Gagal');
-    if (S.profile) { S.profile.coins = data.new_coins; }
+    var res=await sb.rpc('claim_quest_reward',{p_user_id:S.user.id,p_quest_key:questKey});
+    if(res.error) throw res.error;
+    if(!res.data||!res.data.success) throw new Error(res.data?res.data.error:'Gagal');
+    S.profile.coins=res.data.new_coins;
     renderHUD(); loadQuests();
-    toast(`+${data.reward_coins} koin +${data.reward_xp} XP dari misi!`);
-  } catch (err) { toast('⚠ ' + err.message); }
+    toast('+'+res.data.reward_coins+' koin +'+res.data.reward_xp+' XP dari misi!');
+  } catch(err){ toast('⚠ '+err.message); }
 }
 
-// ══════════════════════════════════════════
-// VFX
-// ══════════════════════════════════════════
-function spawnCoinFly(text, target) {
-  const el = document.createElement('div');
-  el.className = 'coin-fly';
-  el.textContent = text;
-  if (target) {
-    const r = target.getBoundingClientRect();
-    el.style.left = (r.left + r.width/2 - 30) + 'px';
-    el.style.top  = (r.top - 10) + 'px';
-  } else {
-    el.style.left = '50%'; el.style.top = '40%'; el.style.transform = 'translateX(-50%)';
-  }
-  document.body.appendChild(el);
-  setTimeout(() => el.remove(), 900);
+// ── VFX ──────────────────────────────────────────────────
+function spawnCoinFly(text,target){
+  var el=document.createElement('div'); el.className='coin-fly'; el.textContent=text;
+  if(target){ var r=target.getBoundingClientRect(); el.style.left=(r.left+r.width/2-30)+'px'; el.style.top=(r.top-10)+'px'; }
+  else { el.style.left='50%'; el.style.top='40%'; el.style.transform='translateX(-50%)'; }
+  document.body.appendChild(el); setTimeout(function(){ el.remove(); },900);
 }
 
-// ══════════════════════════════════════════
-// BOOT
-// ══════════════════════════════════════════
-
-// Wire auth button events (no onclick in HTML — avoids "not defined" errors)
-document.addEventListener('DOMContentLoaded', function() {
-  // Register card
-  var regBtn = $('regBtn');
-  if (regBtn) regBtn.addEventListener('click', doRegister);
-
-  var captchaCanvas = $('captchaCanvas');
-  if (captchaCanvas) captchaCanvas.addEventListener('click', generateCaptcha);
-
-  var captchaRefresh = $('captchaRefreshBtn');
-  if (captchaRefresh) captchaRefresh.addEventListener('click', generateCaptcha);
-
-  var captchaInput = $('captchaInput');
-  if (captchaInput) {
-    captchaInput.addEventListener('input', function() {
-      var val = this.value.toUpperCase();
-      this.value = val;
-      if (val === _captchaCode) this.classList.add('captcha-ok');
-      else this.classList.remove('captcha-ok');
-    });
-    captchaInput.addEventListener('keydown', function(e) {
-      if (e.key === 'Enter') doRegister();
-    });
+// ── BOOT ─────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', function(){
+  // Register
+  var rb=$('regBtn'); if(rb) rb.addEventListener('click',doRegister);
+  var cc=$('captchaCanvas'); if(cc) cc.addEventListener('click',generateCaptcha);
+  var cr=$('captchaRefreshBtn'); if(cr) cr.addEventListener('click',generateCaptcha);
+  var ci=$('captchaInput');
+  if(ci){
+    ci.addEventListener('input',function(){ var v=this.value.toUpperCase(); this.value=v; this.classList.toggle('captcha-ok',v===_captchaCode); });
+    ci.addEventListener('keydown',function(e){ if(e.key==='Enter') doRegister(); });
   }
-
-  var regBirth = $('regBirth');
-  if (regBirth) {
-    regBirth.addEventListener('input', function() {
-      // Auto-format: add / after day and month
-      var v = this.value.replace(/\D/g,'');
-      if (v.length >= 5) v = v.slice(0,2)+'/'+v.slice(2,4)+'/'+v.slice(4,6);
-      else if (v.length >= 3) v = v.slice(0,2)+'/'+v.slice(2);
-      this.value = v;
-    });
-  }
-
-  var switchToLogin = $('switchToLogin');
-  if (switchToLogin) switchToLogin.addEventListener('click', showLogin);
-
-  // Login card
-  var loginBtn = $('loginBtn');
-  if (loginBtn) loginBtn.addEventListener('click', doLogin);
-
-  var loginPassword = $('loginPassword');
-  if (loginPassword) loginPassword.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') doLogin();
+  var rb2=$('regBirth');
+  if(rb2) rb2.addEventListener('input',function(){
+    var v=this.value.replace(/[^0-9]/g,'');
+    if(v.length>=5) v=v.slice(0,2)+'/'+v.slice(2,4)+'/'+v.slice(4,6);
+    else if(v.length>=3) v=v.slice(0,2)+'/'+v.slice(2);
+    this.value=v;
   });
-
-  var switchToRegister = $('switchToRegister');
-  if (switchToRegister) switchToRegister.addEventListener('click', showRegister);
-
-  // Generate captcha on load (register is shown first)
+  var stl=$('switchToLogin'); if(stl) stl.addEventListener('click',showLogin);
+  // Login
+  var lb=$('loginBtn'); if(lb) lb.addEventListener('click',doLogin);
+  var lp=$('loginPassword'); if(lp) lp.addEventListener('keydown',function(e){ if(e.key==='Enter') doLogin(); });
+  var str=$('switchToRegister'); if(str) str.addEventListener('click',showRegister);
+  // Generate captcha
   generateCaptcha();
 });
 
-// Auth state listener
-sb.auth.onAuthStateChange(function(event, session) {
-  if (event === 'SIGNED_IN' && session && session.user) {
-    $('authScreen').style.display = 'none';
+// Auth listener
+sb.auth.onAuthStateChange(function(event,session){
+  if(event==='SIGNED_IN'&&session&&session.user){
+    var as=$('authScreen'); if(as) as.style.display='none';
     initGame(session.user);
-  } else if (event === 'SIGNED_OUT') {
-    $('authScreen').style.display = 'flex';
-    $('topHeader').style.display = 'none';
-    $('bottomNav').style.display = 'none';
+  } else if(event==='SIGNED_OUT'){
+    var as=$('authScreen'),th=$('topHeader'),bn=$('bottomNav');
+    if(as) as.style.display='flex';
+    if(th) th.style.display='none';
+    if(bn) bn.style.display='none';
     showRegister();
   }
 });
 
-// Check existing session on page load
-sb.auth.getSession().then(function(res) {
-  var session = res && res.data && res.data.session;
-  if (session && session.user) {
-    $('authScreen').style.display = 'none';
+// Check session on load
+sb.auth.getSession().then(function(res){
+  var session=res&&res.data&&res.data.session;
+  if(session&&session.user){
+    var as=$('authScreen'); if(as) as.style.display='none';
     initGame(session.user);
   }
 });
+
 </script>
 </body>
 </html>
